@@ -1,11 +1,14 @@
-// Operating Systems Project 3
+// Operating Systems Project 4
 // Author: Maija Garson
-// Date: 03/21/2025
-// Descriptions: A program that takesin command line options to run child processes up to a given amount. These processes will run
-// simultaneously up to the specified amount. The child process will continue to run up until a specified time and will execute at
-// specified intervals. This program also maintains and increments a clock that the children use to keep track of time. All relevant
-// info is stored in a Process Control Block (PCB) table that prints every half second. This program will send and receive messages
-// to/from the child process(es) incrementally to determine when any child process has ended.
+// Date: 04/15/2025
+// Description: A program that simulates an operating system scheduler using a multi-level feedback queue.
+// This program takes in command line options to determine total number of child processes to create, how
+// many processes can run simultaneously, the time limit for each child process, and the interval between
+// spawning children. This program creates a system clock in shared memory and uses it to determine time
+// within the program. Information about the child processes are stored in a Process Control Block table.
+// This program schedules children by sending messages to the child processes with a message queue and 
+// receives responses from the children to determine if the child terminated or not.
+
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -45,6 +48,11 @@ typedef struct
 	int startSeconds; // Time when it was forked
 	int startNano; // Time when it was forked
 	int messagesSent; // Total times oss sent a message to it
+	int serviceTimeSeconds; // Total CPU service time in sec
+	int serviceTimeNano; // Total CPU service time in ns
+	int eventWaitSec; // Total wait time in sec
+	int eventWaitNano; // Total wait time in ns
+	int blocked; // Indicates if process is blocked
 } PCB;
 
 // Message buffer for communication between OSS and child processes
@@ -69,6 +77,23 @@ int increm; // Clock increment (based on number of children currently running)
 FILE* logfile = NULL; // Pointer to logfile
 bool logging = false; // Bool to determine if output should also print to logfile
 
+// Priority queues for scheduling
+queue<int> rQueue0;
+queue<int> rQueue1;
+queue<int> rQueue2;
+
+// Time quantums for each priority queue in ns
+const int baseq = 10000000;
+const int q0 = baseq;
+const int q1 = 2 * baseq;
+const int q2 = 4 * baseq;
+
+// Variables to track statistics
+long long totalTurnaroundTimeNs = 0; 
+long long terminatedProcesses = 0;
+long long totalIdleTimeNs = 0;
+long long totalServiceTimeNs = 0;
+
 void print_usage(const char * app)
 {
        	fprintf (stdout, "usage: %s [-h] [-n proc] [-s simul] [-t timelimitForChildren] [-i intervalInMsToLaunchChildren\n",\
@@ -84,8 +109,8 @@ void print_usage(const char * app)
 void incrementClock()
 {
 	// Calculate increment based on number of currently running chldren
-	if (running > 0) increm = 250000000 / running;
-	else increm = 250000000;
+	if (running > 0) increm = 10000000 / running;
+	else increm = 10000000;
 
 	// Update nanoseconds and check for overflow
 	nanoSec += increm;
@@ -98,6 +123,19 @@ void incrementClock()
 	// Update shared memory pointers with calculated time
 	shm_ptr[0] = sec;
 	shm_ptr[1] = nanoSec;
+}
+
+// Function to add a small overhead of 1000 ns to the clock
+void addOverhead()
+{
+	// Increment ns in shared memor
+	shm_ptr[1] += 1000;
+	// Check for overflow
+	if (shm_ptr[1] >= 1000000000)
+	{
+		shm_ptr[1] -= 1000000000;
+		shm_ptr[0]++;
+	}
 }
 
 // Function to access and add to shared memory
@@ -127,8 +165,8 @@ void shareMem()
 	shm_ptr[1] = 0;
 }
 
-// FUnction to print formatted process table
-void printTable(int n)
+// FUnction to print formatted process table and contents of the three different priority queues
+void printInfo(int n)
 {
 	if (logging) // Determine if output should also print to logfile
 	{
@@ -163,8 +201,62 @@ void printTable(int n)
 				printf("%d\t%d\t\t%d\t%u\t%u\n", i, processTable[i].occupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
 
 		}
-		printf("\n");
 	}
+	
+	// Create temporary queues to print contents of priority queues
+	queue<int> temp0 = rQueue0;
+	queue<int> temp1 = rQueue1;
+	queue<int> temp2 = rQueue2;
+
+	printf("\n");
+	if (logging) fprintf(logfile, "\n");
+	printf("----MLFQ State----\n");
+	if (logging) fprintf (logfile, "-----MLFQ State----\n");
+
+	// Incrementally print each queue's contents
+	// Queue 0
+	printf("Queue 0: ");
+	if (logging) fprintf(logfile, "Queue 0: ");
+	while(!temp0.empty())
+	{
+		int i = temp0.front();
+		temp0.pop();
+		printf("[Table Index: %d; PID: %d] ", i, processTable[i].pid);
+		if (logging) fprintf(logfile, "[Table Index: %d; PID: %d] ", i, processTable[i].pid);
+	}
+	printf("\n");
+	if (logging) fprintf(logfile, "\n");
+	
+	// Queue 1
+	printf("Queue 1: ");
+	if (logging) fprintf(logfile, "Queue 1: ");
+
+	while(!temp1.empty())
+	{
+		int i = temp1.front();
+		temp1.pop();
+		printf("[Table Index: %d; PID: %d] ", i, processTable[i].pid);
+		if (logging) fprintf(logfile, "[Table Index: %d; PID: %d] ", i, processTable[i].pid);
+	}
+	printf("\n");
+	if (logging) fprintf(logfile, "\n");
+
+	// Queue 2
+	printf("Queue 2: ");
+	if (logging) fprintf(logfile, "Queue 2: ");
+	while (!temp2.empty())
+	{
+		int i = temp2.front();
+		temp2.pop();
+		printf("[Table Index: %d; PID: %d] ", i, processTable[i].pid);
+		if (logging) fprintf(logfile, "[Table Index: %d; PID: %d] ", i, processTable[i].pid);
+	}
+	printf("\n");
+	if (logging) fprintf(logfile, "\n");
+
+	printf("------------------\n\n");
+	if (logging) fprintf(logfile, "------------------\n\n");
+
 }
 
 // Signal handler to terminate all processes after 60 seconds in real time
@@ -188,9 +280,9 @@ void signal_handler(int sig)
 
 int main(int argc, char* argv[])
 {
-	// Signal that will terminate program after 60 sec (real time)
+	// Signal that will terminate program after 3 sec (real time)
 	signal(SIGALRM, signal_handler);
-	alarm(60);
+	alarm(3);
 
 	msgbuffer buf; // Buffer for sending messages to child processes
 	msgbuffer rcvbuf; // Buffer for receiving messages from child processes
@@ -211,7 +303,7 @@ int main(int argc, char* argv[])
 	if ((msqid = msgget(key, PERMS | IPC_CREAT)) == -1)
 	{
 		perror("msgget in parent\n");
-		exit(1);
+		exit(1);
 	}	
 
 	printf("Message queue set up\n");
@@ -411,19 +503,37 @@ int main(int argc, char* argv[])
 	long long int lastPrintSec = shm_ptr[0];
 	long long int lastPrintNs = shm_ptr[1];
 
-	// Initialize process table, all occupied values set to 0
+	// Initialize process table, all values set to 0
 	for (int i = 0; i < options.proc; i++)
+	{
 		processTable[i].occupied = 0;
-
-	std::queue<int> rQueue;
+		processTable[i].serviceTimeSeconds = 0;
+		processTable[i].serviceTimeNano = 0;
+		processTable[i].eventWaitSec = 0;
+		processTable[i].eventWaitNano = 0;
+		processTable[i].blocked = 0;
+	}
 
 	// Convert timelim to string to be passed to child process
 	string str = to_string(options.timelim);
-
 	// Creates new char array to hold value to be passed into child program
 	char* arg = new char[str.length()+1];
 	// Copies str to arg so it is able to be passed into the child program
 	strcpy(arg, str.c_str());
+
+	// Max number of sec allowed between spawning processes
+	const int maxBetProcSec = 1;
+	// Max number of ns allowed between spawning processes
+	const int maxBetProcNs = 1000000000;
+	// Calculate current amount of time simulated in ns using shared memory pointers
+	long long currSimT = (shm_ptr[0] * 1000000000) + shm_ptr[1];
+	// Generate random number of sec and ns between 0 through max allowed
+	int randSec = rand() % (maxBetProcSec + 1);
+	int randNs = rand() % (maxBetProcNs + 1);
+	// Calculate total random delay in ns
+	long long randDelay = (randSec * 1000000000) + randNs;
+	// Calculate next spawn time
+	long long nSpawnT = currSimT + randDelay;
 
 	// Loop that will continue until specified amount of child processes is reached or until running processes is 0
 	// Ensures only the specified amount of processes are able to run, and that no processses are still running when the loop ends
@@ -431,6 +541,8 @@ int main(int argc, char* argv[])
 	{
 		// Update system clock
 		incrementClock();
+		long long currentTimeNs = ((long long)shm_ptr[0] * 1000000000) + shm_ptr[1];
+
 		// Calculate time since last print for sec and ns
 		long long int printDiffSec = shm_ptr[0] - lastPrintSec;
 		long long int printDiffNs = shm_ptr[1] - lastPrintNs;
@@ -445,24 +557,20 @@ int main(int argc, char* argv[])
 
 		if (printTotDiff >= 500000000) // Determine if time of last print surpasssed .5 sec system time
 		{
-			// If true, print table and update time since last print in sec and ns
-			printTable(options.proc);
+			// If true, print table and MLFQ info and update time since last print in sec and ns
+			printInfo(options.proc);
 			lastPrintSec = shm_ptr[0];
 			lastPrintNs = shm_ptr[1];
 		}
 
-		long long int totDiffSec = shm_ptr[0] - lastForkSec;
-		long long int totDiffNs = shm_ptr[1] - lastForkNs;
-		if (totDiffNs < 0)
-		{
-			totDiffSec--;
-			totDiffNs += 1000000000;
-		}
-		long long int totDiff = totDiffSec * 1000000000 + totDiffNs;
 
-		// Loop that will continue until both total amount of processes is greater than/ equal to specified amount
-		// and current processes running is greater than/ equal to specified amount
-		if (totDiff >= options.interval && total < options.proc && running < options.simul)
+		// Calculate current amount of time simulated in ns
+		currSimT = (shm_ptr[0] * 1000000000) + shm_ptr[1];
+
+		// Determine if a new child process can be spawned
+		// Must be greater than next spawn time, less than total process allowed, and less than simultanous processes allowed
+		// Also ensures no more than 100 processes are spawned
+		if (currSimT >= nSpawnT && total < options.proc && total < 100  && running < options.simul)
 		{	
 			//Fork new child
 			pid_t childPid = fork();
@@ -496,7 +604,13 @@ int main(int argc, char* argv[])
 						processTable[i].pid = childPid;
 						processTable[i].startSeconds = shm_ptr[0];
 						processTable[i].startNano = shm_ptr[1];
-						rQueue.push(i);
+						processTable[i].serviceTimeSeconds = 0;
+						processTable[i].serviceTimeNano = 0;
+						processTable[i].eventWaitSec = 0;
+						processTable[i].eventWaitNano = 0;
+						processTable[i].blocked = 0;
+						// Add process index to queue 0 since this process is ready to be scheduled
+						rQueue0.push(i);
 						break;
 					}
 				}
@@ -505,63 +619,190 @@ int main(int argc, char* argv[])
 				lastForkSec = shm_ptr[0];
 				lastForkNs = shm_ptr[1];
 
+				// Calculate next randomly generated spawn time
+				randSec = rand() % (maxBetProcSec + 1);
+				randNs = rand() % (maxBetProcNs + 1);
+				randDelay = (randSec * 1000000000) + randNs;
+				nSpawnT = currSimT + randDelay;
+
 			}
 		}
 
-		while(!rQueue.empty())
+
+		// Pointer to an integer queue to track the current ready queue being used
+		std::queue<int>* currQueue = nullptr;
+		// Find the first nonempty queue and set currQueue to point to it
+		if (!rQueue0.empty())
+			currQueue = &rQueue0;
+		else if (!rQueue1.empty())
+			currQueue = &rQueue1;
+		else if (!rQueue2.empty())
+			currQueue = &rQueue2;
+
+		if (currQueue != nullptr && !currQueue->empty())
 		{
-			int indx = rQueue.front();
-			rQueue.pop();
+			// Retreive index of process that is at the front of the current queue
+			int indx = currQueue->front();
+			// Remove this process index from the current queue since it is being processed
+			currQueue->pop();
+
+			// Find pid of corresponding index in process table and set to childP
 			pid_t childP = processTable[indx].pid;
 
+			// Find time quantum for child process based on the queue it was in. 
+			// Process will be given this amount of time to run
+			int quantum = q0;
+			const char* qLevStr = "0";
+			if (currQueue == &rQueue1)
+			{
+				quantum = q1;
+				qLevStr = "1";
+			}
+			else if (currQueue == &rQueue2)
+			{
+				quantum = q2;
+				qLevStr = "2";
+			}
+
+			// Call function to add scheduling overhead to OS 
+			addOverhead();
+
+			// Prepare info for message to child
 			buf.mtype = childP;
-			buf.intData = childP;
+			buf.intData = quantum;
 			strcpy(buf.strData, "1");
 
 			// Send message to child process
 			if (msgsnd(msqid, &buf, sizeof(msgbuffer) - sizeof(long), 0) != -1)
 			{
 				msgsnt++; // Increment amount of messages sent
-				printf("Sending message to worker %d PID %d at time %d:%d\n", indx, buf.intData, shm_ptr[0], shm_ptr[1]);
+				printf("Dispatching process (index %d, queue level %s) with PID %d, time quantum %d ns at time %d:%d\n",
+					       indx, qLevStr, childP, quantum, shm_ptr[0], shm_ptr[1]);
 				if (logging)
-					fprintf(logfile, "Sending message to worker %d PID %d at time %d:%d\n", indx, buf.intData, shm_ptr[0], shm_ptr[1]);
-			}
-			// Wait for response from child
-			if (msgrcv(msqid, &rcvbuf, sizeof(msgbuffer) - sizeof(long), getpid(), 0) != -1)
-			{
-				// Print message from child
-				printf("Receiving message from worker %d PID %d at time %d:%d\n", indx, rcvbuf.intData, shm_ptr[0], shm_ptr[1]);
-				if (logging)
-					fprintf(logfile, "Receiving message from worker %d PID %d at time %d:%d\n", indx, rcvbuf.intData, shm_ptr[0], shm_ptr[1]);
-					
-				// Determine if child sent 0, meaning child will terminate
-				if (strcmp(rcvbuf.strData, "0") == 0)
-				{
-					// Wait for child to terminate
-					wait(0);
-					// Update process table to reflect terminated child
-					processTable[indx].occupied = 0;
-					// Decrement amount of processes currently running
-					running--;	
-				}
-				else
-					// Child has not yet terminated, add back to end of queue
-					rQueue.push(indx);
+					fprintf(logfile, "Dispatching process (index %d, queue level %s) with PID %d, time quantum %d at time %d:%d\n",
+							indx, qLevStr, childP, quantum, shm_ptr[0], shm_ptr[1]);
 			}
 
+
+			// Variable to hold msgrcv value
+			int ret;
+			// Loop until a message from the child process is received while using IPC_NOWAIT to ensure parent can continue
+			while ((ret = msgrcv(msqid, &rcvbuf, sizeof(msgbuffer) - sizeof(long), childP, IPC_NOWAIT)) == -1)
+			{
+				// Means msgrcv failed. Print error and exit program
+				if (errno != ENOMSG)
+				{
+					perror("msgrcv failed");
+					exit(1);
+				}
+				// Continue incrementing the clock even if no message has been received yet
+				// This ensure that clock continues incrementing while child process is running
+				incrementClock();
+			}
+			
+
+			// Update the current clock time in ns
+			currentTimeNs = ((long long)shm_ptr[0] * 100000000) + shm_ptr[1];
+			
+			printf("Receiving message from worker (index  %d PID %d) at time %d:%d\n",
+					indx, rcvbuf.intData, shm_ptr[0], shm_ptr[1]);
+			if (logging)
+				fprintf(logfile, "Receiving message from worker (index %d PID %d) at time %d:%d\n",
+						indx, rcvbuf.intData, shm_ptr[0], shm_ptr[1]);
+
+
+                        // Determine if child sent 0, meaning child will terminate
+                        if (strcmp(rcvbuf.strData, "0") == 0 || rcvbuf.intData < 0)
+                        {
+				// Calculate when process was forked
+				long long arrivalTimeNs = ((long long) processTable[indx].startSeconds * 1000000000) + processTable[indx].startNano;
+				// Calculate process's turnaround time by finding difference between current time and time process forked
+				long long turnaroundNs = currentTimeNs - arrivalTimeNs;
+				// Add to total turnaround time
+				totalTurnaroundTimeNs += turnaroundNs;
+
+				// Calculate process's service time and add to total service time
+				long long procService = ((long long) processTable[indx].serviceTimeSeconds * 1000000000) + processTable[indx].serviceTimeNano;
+				totalServiceTimeNs += procService;
+
+				// Increment terminated processes
+				terminatedProcesses++;
+
+				// Wait for child to terminate
+                                waitpid(childP, NULL, 0);
+				// Update process table to reflect terminated child
+                                processTable[indx].occupied = 0;
+                                // Decrement amount of processes currently running
+				running--;      
+					
+			}
+
+			else // Process did not finish
+                        {
+				// Add process to one queue lower than where it was scheduled from
+				if (processTable[indx].occupied != 0)
+				{
+                                	if (currQueue == &rQueue0)
+                                                rQueue1.push(indx);
+                                	else if (currQueue == &rQueue1)
+                                                rQueue2.push(indx);
+                                        else
+                                                rQueue2.push(indx);
+				}
+                        }
+
+			
+	
 			incrementClock();
 		}
-
-		if (rQueue.empty())
+		else
+		{
+			// No process is ready, simulate cpu idle time
 			incrementClock();
+			totalIdleTimeNs += 10000000;
+		}		
+			
+
 	}
 	printf("Total processes launched: %d\n", total);
 	printf("Total messages sent by OSS: %d\n", msgsnt);
 	if (logging)
 	{
-		fprintf(logfile, "Total processes launched: %d\n", total);
+ 		fprintf(logfile, "Total processes launched: %d\n", total);
 		fprintf(logfile, "Total messages sent by OSS: %d\n", msgsnt);
 	}
+
+	// Calculate the final simulated time
+	long long finalSimT = ((long long)shm_ptr[0] * 1000000000) + shm_ptr[1];
+
+	// Varialbes to find overall statistics
+	long long avgTurnaroundNs = 0;
+	long long avgServiceNs = 0;
+	long long avgWaitNs = 0;
+	long long cpuUtil = 0;
+
+	if (terminatedProcesses > 0) // Ensure there are terminated processess before calculated values, otherwise they remain 0
+	{
+		// Calculate average turnaround time by divinding total turnaoround by amount of terminated processes
+		avgTurnaroundNs = totalTurnaroundTimeNs / terminatedProcesses;
+		// Calculate average service time by dividing total service time by amount of terminated processes
+		avgServiceNs = totalServiceTimeNs / terminatedProcesses;
+		// Calculate average wait time by finding diffeerence between average turnaround time and average service time
+		avgWaitNs = avgTurnaroundNs - avgServiceNs;
+	}
+
+	if (finalSimT > 0)
+		cpuUtil = (totalServiceTimeNs * 100) / finalSimT;
+
+	printf("----Final Statistics----\n");
+	printf("Total simulated time: %lld ns\n", finalSimT);
+	printf("Terminated processes: %lld\n", terminatedProcesses);
+	printf("Average turnaround time: %lld ns\n", avgTurnaroundNs);
+	printf("Average CPU service time: %lld ns\n", avgServiceNs);
+	printf("Average wait time: %lld ns\n", avgWaitNs);
+	printf("CPU utilization: %lld\n", cpuUtil);
+	printf("Total CPU idle time: %lld ns\n", totalIdleTimeNs);
+
 	
 	// Detach from shared memory and remove it
 	if(shmdt(shm_ptr) == -1)

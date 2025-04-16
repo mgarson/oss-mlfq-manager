@@ -128,26 +128,56 @@ int main(int argc, char* argv[])
 			exit(1);
 		}
 
+		int quantum = buf.intData;
+
+		int outcome = rand() % 100;
+		bool termNow = false;
+		int effQuantum = quantum;
+
+		if (outcome < 20)
+		{
+			if (quantum > 1)
+				effQuantum = rand() % quantum;
+			else
+				effQuantum = quantum;
+			termNow = true;
+		}
+		else if (outcome < 50)
+		{
+			if (quantum > 1)
+				effQuantum = rand() % quantum;
+			else effQuantum = quantum;
+		}
+		
+		int startSimTime = shm_ptr[0] * 1000000000 + shm_ptr[1];
+
+		while ((shm_ptr[0] * 1000000000 + shm_ptr[1]) - startSimTime < effQuantum)
+		{
+		}
+
 		i++; // Increment iterations in loop
 
 		printf("Worker PID:%d PPID:%d SysClockS: %d SysClockNano: %d TermTimeS: %d TermTimeNano: %d\n", getpid(), getppid(), shm_ptr[0], shm_ptr[1], endSec, endNs);
 		printf("--%d iterations have passed since starting.\n", i);
 
 		// Get info to send message back to parent
-		buf.mtype = getppid(); 
-		buf.intData = getpid();
-		strcpy(buf.strData, "1");
+		buf.mtype = getpid(); 
+		buf.intData = termNow ? -1 : effQuantum;
+		strcpy(buf.strData, termNow ? "0": "1");
 		// Send message back to parent that process is still running
 		if (msgsnd(msqid, &buf, sizeof(msgbuffer)-sizeof(long), 0) == -1)
 		{
 			perror("msgsnd to parent failed.\n");
 			exit(1);
 		}
+
+		if (termNow)
+			break;
 	}
 
 	// Get info to send message back to parent 
-	buf.mtype = getppid();
-	buf.intData = getpid();
+	buf.mtype = getpid();
+	buf.intData = -1;
 	strcpy(buf.strData, "0");
 	// Send message back to parent that process is terminating
 	if (msgsnd(msqid, &buf, sizeof(msgbuffer)-sizeof(long), 0) == -1)
