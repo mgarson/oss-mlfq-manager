@@ -1,8 +1,11 @@
-// Operating Systems Project 3
+// Operating Systems Project 4
 // Author: Maija Garson
-// Data: 03/21/2025
-// Description: Program that launches from parent process. This process iterate through a loop until the time specified to end. This time is passed in by the parent and is then randomized with 
-// //the passed value as upper bound. In the loop, it prints it's PID, parent's PID, its term time,  and the system timeIt sends a message of 1 to parent if it is still running, or 0 if it will end.
+// Date: 04/18/2025
+// Description: Worker process launched by oss. Uses the clock in shared memory and loops until receiving a message from the parent containing its time
+// quantum. Once it receives the quantum, it generates a random number between 0-99 that will determine if it will either terminate (0-19), block
+// from I/O (20-49) or run its full time quantum (50-99). It will then compute the simulated time that it used and send a message back to the
+// parent containing the amount of time it used along with a status flag: 0 means terminate, -1 means it is blocked, and 1 means it ran its full time 
+// quantum given. Once it decides to terminate, it will leave the loop and terminate.
 
 #include <string.h>
 #include <stdio.h>
@@ -58,50 +61,11 @@ int main(int argc, char* argv[])
 {
 	shareMem();
 	
-	// Tracks time worker started
-	int startSec = shm_ptr[0];
-	int startNs = shm_ptr[1];
-	int lastKSec = startSec;
-
-	// Represents time to end
-	int endSec;
-	int endNs;
-
 	// Info needed for message sending/receiving
 	msgbuffer buf;
 	buf.mtype = 1;
 	int msqid = 0;
 	key_t key;
-
-	if (argv[2] != nullptr) // Determines if second argument was passed, meaning value was given for termination for both sec (argv1) and nanosec(argv2)
-	{
-		endSec = shm_ptr[0] + atoi(argv[1]);
-		endNs = shm_ptr[1] + atoi(argv[2]);
-	}
-
-	else if (argv[1] != nullptr) // Means no second argument given. Only upper value for seconds
-	{
-		// Convert first argument passed to int that represents upper value for random number to be found
-		int upper = atoi(argv[1]);
-		//Generate random run time using pid as seed
-		srand(getpid());
-		int runTimeSec = (rand() % upper) + 1;
-		long long int runTimeNs = (rand() % 999999999);
-		// Calculate time to end program based on random number found
-		endSec = shm_ptr[0] + runTimeSec;
-		endNs = shm_ptr[1] + runTimeNs;
-	}
-	else if (argv[1] == nullptr) // Invalid amount of arguments passed
-	{
-		fprintf(stderr, "Error! No value given for termination time. Program will now end.\n");
-		return EXIT_FAILURE;
-	}
-
-	// Print starting message
-	printf("Worker PID:%d PPID:%d SysClockS: %d SysClockNano: %d TermTimeS: %d TermTimeNano: %d\n", getpid(), getppid(), shm_ptr[0], shm_ptr[1], endSec, endNs);
-	printf("--Just starting\n");
-
-	
 
 	// Get key for message queue
 	if ((key = ftok("msgq.txt", 1)) == -1)
@@ -117,9 +81,10 @@ int main(int argc, char* argv[])
 		exit(1);
 	}
 
-	int i = 0; // Amount of iterations in while loop
+	srand(getpid());
+
 	// Loop that loop suntil determined end time is reached
-	while (shm_ptr[0] < endSec || (shm_ptr[0] == endSec && shm_ptr[1] < endNs))
+	while(true)
 	{
 		// Receive message from parent
 		if (msgrcv(msqid, &buf, sizeof(msgbuffer) - sizeof(long), getpid(), 0) == -1)
@@ -128,42 +93,51 @@ int main(int argc, char* argv[])
 			exit(1);
 		}
 
+		// Get time quantum given from parent in message. This is amount of time child runs
 		int quantum = buf.intData;
 
+		// Generate random number to determine child's outcome in this iteration
 		int outcome = rand() % 100;
+		// Bool to represent if child should terminate, set to false initially
 		bool termNow = false;
+		bool blockNow = false;
+		// Stores what child's time quantum will be based on outcome generated. Initally set to full quantum
 		int effQuantum = quantum;
 
+		// If less than 20, early termination
 		if (outcome < 20)
 		{
+			// If quantum is greater than 1, set effQuantum to random number less than full quantum
 			if (quantum > 1)
 				effQuantum = rand() % quantum;
+			// Else set effQuantum to the full quantum
 			else
 				effQuantum = quantum;
+			// Set to true, so process will temrinate after using effQuantum time
 			termNow = true;
 		}
+		// Else outcome between 20-49, simulate I/O interrupt. Process will not terminate after this iteration
 		else if (outcome < 50)
 		{
+			// If quantum is greater than 1, set effQuantum to random number less than full quantum
 			if (quantum > 1)
 				effQuantum = rand() % quantum;
+			// Else set effQuantum to full quantum
 			else effQuantum = quantum;
+			blockNow = true;
 		}
 		
-		int startSimTime = shm_ptr[0] * 1000000000 + shm_ptr[1];
-
-		while ((shm_ptr[0] * 1000000000 + shm_ptr[1]) - startSimTime < effQuantum)
-		{
-		}
-
-		i++; // Increment iterations in loop
-
-		printf("Worker PID:%d PPID:%d SysClockS: %d SysClockNano: %d TermTimeS: %d TermTimeNano: %d\n", getpid(), getppid(), shm_ptr[0], shm_ptr[1], endSec, endNs);
-		printf("--%d iterations have passed since starting.\n", i);
 
 		// Get info to send message back to parent
-		buf.mtype = getpid(); 
-		buf.intData = termNow ? -1 : effQuantum;
-		strcpy(buf.strData, termNow ? "0": "1");
+		buf.mtype = getpid();
+	 	buf.intData = effQuantum;	
+		if (termNow)
+			strcpy(buf.strData, "0");
+		else if (blockNow)
+			strcpy(buf.strData, "-1");
+		else
+			strcpy(buf.strData, "1");
+
 		// Send message back to parent that process is still running
 		if (msgsnd(msqid, &buf, sizeof(msgbuffer)-sizeof(long), 0) == -1)
 		{
@@ -174,20 +148,6 @@ int main(int argc, char* argv[])
 		if (termNow)
 			break;
 	}
-
-	// Get info to send message back to parent 
-	buf.mtype = getpid();
-	buf.intData = -1;
-	strcpy(buf.strData, "0");
-	// Send message back to parent that process is terminating
-	if (msgsnd(msqid, &buf, sizeof(msgbuffer)-sizeof(long), 0) == -1)
-	{
-		perror("msgsnd to parent failed.\n");
-		exit(1);
-	}
-
-	printf("WORKER PID:%d PPID:%d SysClockS: %d SysClockNano: %d TermTimeS: %d TermTimeNano: %d\n", getpid(), getppid(), shm_ptr[0], shm_ptr[1], endSec, endNs);
-	printf("--Terminating after sending message back to oss after %d iterations\n", i);
 	
 	// Detach from memory
 	if (shmdt(shm_ptr) == -1)
