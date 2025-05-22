@@ -1,12 +1,3 @@
-// Operating Systems Project 4
-// Author: Maija Garson
-// Date: 04/18/2025
-// Description: Worker process launched by oss. Uses the clock in shared memory and loops until receiving a message from the parent containing its time
-// quantum. Once it receives the quantum, it generates a random number between 0-99 that will determine if it will either terminate (0-19), block
-// from I/O (20-49) or run its full time quantum (50-99). It will then compute the simulated time that it used and send a message back to the
-// parent containing the amount of time it used along with a status flag: 0 means terminate, -1 means it is blocked, and 1 means it ran its full time 
-// quantum given. Once it decides to terminate, it will leave the loop and terminate.
-
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

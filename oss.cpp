@@ -1,19 +1,3 @@
-// Operating Systems Project 4
-// Author: Maija Garson
-// Date: 04/18/2025
-// Description: A program that simulates an operating system scheduler using a multi-level feedback queue.
-// This program will run in a loop until it forks up to 100 child processes, with 18 allowed simultaneously.
-// This program creates a system clock in shared memory and uses it to determine time within the program. 
-// Information about the child processes are stored in a Process Control Block table. This program schedules 
-// children by sending messages to the child processes using a message queue, these messages sent the child
-// the total allowed time quantum it can run before stopping. The quantum is based on which queue the child
-// is in at that time. It will always schedule the children in the highest priority queue. It will then wait
-// for a response from the child, which informs oss how much of its time it used and also its status (terminated,
-// blocked, or used full quantum). This program then puts the processes that did not terminate back into a
-// queue based on its status and the queue it was previously in. This program will also print the PCB table
-// and queue states every half second of system time. At the end, it will calculate and print statistics based on the run.
-// The program will send a kill signal to all processes and terminate if 3 real-life seconds are reached.
-
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/wait.h>
